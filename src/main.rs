@@ -56,6 +56,7 @@ mod crypto;
 #[macro_use]
 mod db;
 mod http_client;
+mod locale;
 mod mail;
 mod ratelimit;
 mod sso;

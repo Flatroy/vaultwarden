@@ -14,6 +14,7 @@ use serde::de::{self, Deserialize, Deserializer, MapAccess, Visitor};
 
 use crate::{
     error::Error,
+    locale::Locale,
     storage,
     util::{
         FeatureFlagFilter, get_active_web_release, get_env, get_env_bool, is_valid_email,
@@ -945,6 +946,8 @@ make_config! {
         smtp_accept_invalid_certs:     bool,   true,   def,     false;
         /// Accept Invalid Hostnames (Know the risks!) |> DANGEROUS: Allow invalid hostnames. This option introduces significant vulnerabilities to man-in-the-middle attacks!
         smtp_accept_invalid_hostnames: bool,   true,   def,     false;
+        /// Default email language |> ("en", "ru") Language of emails sent to users whose language is not known yet
+        email_default_locale:          String, true,   def,     "en".to_owned();
     },
 
     /// Email 2FA Settings
@@ -1178,6 +1181,13 @@ fn validate_config(cfg: &ConfigItems, on_update: bool) -> Result<(), Error> {
                 )
             }
         }
+    }
+
+    if Locale::from_code(&cfg.email_default_locale).is_none() {
+        err!(format!(
+            "`EMAIL_DEFAULT_LOCALE` is invalid. It needs to be one of the following options: {}",
+            Locale::SUPPORTED_CODES.join(", ")
+        ))
     }
 
     if cfg._enable_smtp {
@@ -1954,3 +1964,42 @@ handlebars::handlebars_helper!(webver: | web_vault_version: String |
 handlebars::handlebars_helper!(vwver: | vw_version: String |
     semver::VersionReq::parse(&vw_version).expect("Invalid Vaultwarden version compare string").matches(&VW_VERSION)
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn validate_with_locale(locale: &str) -> Result<(), Error> {
+        let builder = ConfigBuilder {
+            database_url: Some("sqlite://:memory:".to_owned()),
+            email_default_locale: Some(locale.to_owned()),
+            ..ConfigBuilder::default()
+        };
+        validate_config(&builder.build(), false)
+    }
+
+    #[test]
+    fn test_email_default_locale_defaults_to_english() {
+        let default_locale = ConfigBuilder::default().build().email_default_locale;
+        assert_eq!(default_locale, "en", "default EMAIL_DEFAULT_LOCALE");
+    }
+
+    #[test]
+    fn test_validate_config_accepts_supported_email_default_locale() {
+        for locale in ["en", "ru", "RU", "ru-RU", "en_GB"] {
+            let result = validate_with_locale(locale);
+            assert!(result.is_ok(), "EMAIL_DEFAULT_LOCALE={locale:?} was rejected: {result:?}");
+        }
+    }
+
+    #[test]
+    fn test_validate_config_rejects_unsupported_email_default_locale() {
+        for locale in ["de", "", "garbage"] {
+            let message = validate_with_locale(locale)
+                .expect_err(&format!("EMAIL_DEFAULT_LOCALE={locale:?} was accepted"))
+                .to_string();
+            assert!(message.contains("EMAIL_DEFAULT_LOCALE"), "EMAIL_DEFAULT_LOCALE={locale:?} error: {message}");
+            assert!(message.contains("en, ru"), "error does not list the supported codes: {message}");
+        }
+    }
+}
