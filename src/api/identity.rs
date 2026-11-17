@@ -376,7 +376,7 @@ async fn sso_login(
     // Set the user_uuid here to be passed back used for event logging.
     *user_id = Some(user.uuid.clone());
 
-    capture_locale(&mut user, client_header.locale, conn).await?;
+    capture_locale(&mut user, client_header.locale, conn).await;
 
     // We passed 2FA get auth tokens
     let auth_tokens = sso::redeem(&device, &user, data.client_id, sso_user, sso_auth, user_infos, conn).await?;
@@ -384,12 +384,14 @@ async fn sso_login(
     authenticated_response(&user, &mut device, auth_tokens, twofactor_token, conn, ip).await
 }
 
-/// Takes the language the client asked for at login as the locale of the user's emails.
-async fn capture_locale(user: &mut User, requested: Option<Locale>, conn: &DbConn) -> EmptyResult {
-    if user.adopt_locale(requested) {
-        user.save(conn).await?;
+/// Takes the language the client asked for at login as the locale of the user's emails. A failed save is only logged:
+/// the email language is not worth locking a user out.
+async fn capture_locale(user: &mut User, requested: Option<Locale>, conn: &DbConn) {
+    if user.adopt_locale(requested)
+        && let Err(e) = user.save(conn).await
+    {
+        warn!("Could not save locale {} of user {}: {e:?}", user.locale, user.uuid);
     }
-    Ok(())
 }
 
 async fn password_login(
@@ -526,7 +528,7 @@ async fn password_login(
         )
     }
 
-    capture_locale(&mut user, client_header.locale, conn).await?;
+    capture_locale(&mut user, client_header.locale, conn).await;
 
     let auth_tokens = auth::AuthTokens::new(&device, &user, AuthMethod::Password, data.client_id);
 
@@ -753,7 +755,7 @@ async fn user_api_key_login(
 
     let mut device = get_device(&data, conn, &user).await?;
 
-    capture_locale(&mut user, client_header.locale, conn).await?;
+    capture_locale(&mut user, client_header.locale, conn).await;
 
     if CONFIG.mail_enabled() && device.is_new() {
         let now = Utc::now().naive_utc();
@@ -1482,13 +1484,33 @@ mod tests {
                 user.save(&conn).await.unwrap();
                 let updated_at_before = User::find_by_uuid(&user.uuid, &conn).await.unwrap().updated_at;
 
-                capture_locale(&mut user, requested, &conn).await.unwrap();
+                capture_locale(&mut user, requested, &conn).await;
 
                 let reloaded = User::find_by_uuid(&user.uuid, &conn).await.unwrap();
                 let case = format!("stored {stored:?}, requested {requested:?}");
                 assert_eq!(reloaded.locale(), expected, "locale in the database, {case}");
                 assert_eq!(reloaded.updated_at != updated_at_before, expect_write, "database write, {case}");
             }
+        });
+    }
+
+    #[cfg(sqlite)]
+    #[test]
+    fn test_capture_locale_survives_a_failed_save() {
+        crate::db::test_db::run(async |db| {
+            let conn = db.conn();
+            let mut user = User::new("not-an-email", None);
+            user.set_locale(Locale::En);
+            assert!(user.save(&conn).await.is_err(), "precondition: saving a user with an invalid email must fail");
+
+            capture_locale(&mut user, Some(Locale::Ru), &conn).await;
+
+            assert_eq!(user.locale(), Locale::Ru, "in-memory locale after a failed save, the login must go on");
+            assert!(
+                User::find_by_uuid(&user.uuid, &conn).await.is_none(),
+                "nothing may be stored for {:?}",
+                user.email
+            );
         });
     }
 }
