@@ -204,6 +204,18 @@ impl User {
         locale.code().clone_into(&mut self.locale);
     }
 
+    /// Switches to the locale a client asked for at login. `true` when the stored locale changed and needs saving.
+    pub fn adopt_locale(&mut self, requested: Option<Locale>) -> bool {
+        let Some(requested) = requested else {
+            return false;
+        };
+        let changed = requested != self.locale();
+        if changed {
+            self.set_locale(requested);
+        }
+        changed
+    }
+
     pub fn is_v2(&self) -> bool {
         self.signed_public_key.is_some() && self.security_state.is_some() && self.security_version.is_some()
     }
@@ -840,5 +852,41 @@ mod tests {
             user.locale = stored.to_owned();
             assert_eq!(user.locale(), Locale::Ru, "locale() of stored {stored:?}, EMAIL_DEFAULT_LOCALE=ru");
         }
+    }
+
+    #[test]
+    fn test_adopt_locale() {
+        if !crate::locale::in_isolated_config(&[]) {
+            return;
+        }
+
+        // (stored, requested, expected return, expected stored afterwards)
+        let cases = [
+            (Locale::En, Some(Locale::Ru), true, Locale::Ru),
+            (Locale::Ru, Some(Locale::En), true, Locale::En),
+            (Locale::En, Some(Locale::En), false, Locale::En),
+            (Locale::Ru, Some(Locale::Ru), false, Locale::Ru),
+            (Locale::En, None, false, Locale::En),
+            (Locale::Ru, None, false, Locale::Ru),
+        ];
+        for (stored, requested, expected_changed, expected_locale) in cases {
+            let mut user = User::new("user@example.com", None);
+            user.set_locale(stored);
+            let changed = user.adopt_locale(requested);
+            assert_eq!(changed, expected_changed, "adopt_locale({requested:?}) on stored {stored:?}: changed");
+            assert_eq!(user.locale(), expected_locale, "adopt_locale({requested:?}) on stored {stored:?}: locale");
+        }
+    }
+
+    #[test]
+    fn test_adopt_locale_keeps_unparseable_stored_value_when_nothing_requested() {
+        if !crate::locale::in_isolated_config(&[]) {
+            return;
+        }
+
+        let mut user = User::new("user@example.com", None);
+        user.locale = "garbage".to_owned();
+        assert!(!user.adopt_locale(None), "adopt_locale(None) on stored \"garbage\" must not ask for a save");
+        assert_eq!(user.locale, "garbage", "stored locale after adopt_locale(None)");
     }
 }

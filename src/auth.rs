@@ -38,6 +38,7 @@ use crate::{
         },
     },
     error::Error,
+    locale::Locale,
     sso,
 };
 
@@ -635,6 +636,8 @@ pub struct ClientHeaders {
     /// `Bitwarden-Client-Version`, `None` when missing or not a version. Unlike the [`ClientVersion`] guard, this
     /// doesn't log an error, as not every client sends it.
     pub client_version: Option<semver::Version>,
+    /// The supported language `Accept-Language` prefers, `None` when it is missing or has no supported language.
+    pub locale: Option<Locale>,
 }
 
 #[rocket::async_trait]
@@ -658,6 +661,7 @@ impl<'r> FromRequest<'r> for ClientHeaders {
             device_type,
             ip,
             client_version,
+            locale: request.headers().get_one("Accept-Language").and_then(Locale::from_accept_language),
         })
     }
 }

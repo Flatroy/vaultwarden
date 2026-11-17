@@ -130,8 +130,10 @@ function inviteUser(event) {
     event.preventDefault();
     event.stopPropagation();
     const email = document.getElementById("inviteEmail");
+    const locale = document.getElementById("inviteLocale");
     const data = JSON.stringify({
-        "email": email.value
+        "email": email.value,
+        "locale": locale.value || undefined
     });
     email.value = "";
     _post(`${BASE_URL}/admin/invite`,

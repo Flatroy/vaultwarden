@@ -1,4 +1,6 @@
-use crate::CONFIG;
+use rocket::http::Status;
+
+use crate::{CONFIG, api::ApiResult};
 
 const CODE_EN: &str = "en";
 const CODE_RU: &str = "ru";
@@ -50,6 +52,25 @@ impl Locale {
             }
         }
         best.map(|(_, locale)| locale)
+    }
+
+    /// Boundary parser for the `locale` of an invite request: absent means the server default, a language that is
+    /// not supported is rejected with a 400.
+    pub fn from_invite(code: Option<&str>) -> ApiResult<Locale> {
+        let Some(code) = code else {
+            return Ok(Locale::server_default());
+        };
+        let Some(locale) = Locale::from_code(code) else {
+            err_code!(
+                format!(
+                    "Unsupported locale \"{}\", supported locales: {}",
+                    code.escape_debug(),
+                    Locale::SUPPORTED_CODES.join(", ")
+                ),
+                Status::BadRequest.code
+            )
+        };
+        Ok(locale)
     }
 
     /// `EMAIL_DEFAULT_LOCALE`, which config validation guarantees to be supported.
@@ -217,5 +238,33 @@ mod tests {
             return;
         }
         assert_eq!(Locale::server_default(), Locale::En, "EMAIL_DEFAULT_LOCALE unset");
+    }
+
+    #[test]
+    fn test_from_invite() {
+        if !in_isolated_config(&[("EMAIL_DEFAULT_LOCALE", "ru")]) {
+            return;
+        }
+        let accepted = [
+            (None, Locale::Ru),
+            (Some("en"), Locale::En),
+            (Some("ru"), Locale::Ru),
+            (Some("ru-RU"), Locale::Ru),
+            (Some("EN_us"), Locale::En),
+        ];
+        for (code, expected) in accepted {
+            let locale = Locale::from_invite(code).unwrap_or_else(|e| panic!("from_invite({code:?}) failed: {e}"));
+            assert_eq!(locale, expected, "from_invite({code:?}), EMAIL_DEFAULT_LOCALE=ru");
+        }
+
+        for code in ["de", "", "russian", "*", "x\ny"] {
+            let Err(error) = Locale::from_invite(Some(code)) else {
+                panic!("from_invite(Some({code:?})) was accepted");
+            };
+            let message = error.message();
+            assert!(message.starts_with("Unsupported locale"), "from_invite(Some({code:?})) message: {message:?}");
+            assert!(message.contains("en, ru"), "message for {code:?} must list the supported codes: {message:?}");
+            assert!(!message.contains('\n'), "message for {code:?} must escape the input: {message:?}");
+        }
     }
 }

@@ -27,6 +27,7 @@ use crate::{
             custom_roles_enabled,
         },
     },
+    locale::Locale,
     mail,
     sso::FAKE_SSO_IDENTIFIER,
     util::{NumberOrString, convert_json_key_lcase_first},
@@ -1085,6 +1086,7 @@ struct InviteData {
     collections: Option<Vec<CollectionData>>,
     #[serde(default)]
     permissions: HashMap<String, Value>,
+    locale: Option<String>,
 }
 
 impl InviteData {
@@ -1173,6 +1175,7 @@ async fn send_invite(
     }
     let data: InviteData = data.into_inner();
     data.validate(&org_id, &conn).await?;
+    let locale = Locale::from_invite(data.locale.as_deref())?;
 
     // HACK: We need the raw user-type to be sure custom role is selected to determine the access_all permission
     // Unless Custom roles are enabled, a custom role (4) is converted to a manager role (3)
@@ -1224,6 +1227,7 @@ async fn send_invite(
                 }
 
                 let mut new_user = User::new(email, None);
+                new_user.set_locale(locale);
                 new_user.save(&conn).await?;
                 user_created = true;
                 new_user

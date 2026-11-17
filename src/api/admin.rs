@@ -31,6 +31,7 @@ use crate::{
     },
     error::{Error, MapResult},
     http_client::make_http_request,
+    locale::Locale,
     mail,
     sso::FAKE_SSO_IDENTIFIER,
     util::{
@@ -300,6 +301,7 @@ fn admin_page_login() -> ApiResult<Html<String>> {
 #[serde(rename_all = "camelCase")]
 struct InviteData {
     email: String,
+    locale: Option<String>,
 }
 
 async fn get_user_or_404(user_id: &UserId, conn: &DbConn) -> ApiResult<User> {
@@ -328,11 +330,13 @@ async fn invite_user(data: Json<InviteData>, _token: AdminToken, conn: DbConn) -
     }
 
     let data: InviteData = data.into_inner();
+    let locale = Locale::from_invite(data.locale.as_deref())?;
     if User::find_by_mail(&data.email, &conn).await.is_some() {
         err_code!("User already exists", Status::Conflict.code)
     }
 
     let mut user = User::new(&data.email, None);
+    user.set_locale(locale);
 
     generate_invite(&user, &conn).await.map_err(|e| e.with_code(Status::InternalServerError.code))?;
     user.save(&conn).await.map_err(|e| e.with_code(Status::InternalServerError.code))?;

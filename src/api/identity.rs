@@ -35,6 +35,7 @@ use crate::{
         },
     },
     error::MapResult,
+    locale::Locale,
     mail, sso,
     sso::{OIDCCode, OIDCCodeChallenge, OIDCCodeVerifier, OIDCState},
     util,
@@ -286,7 +287,7 @@ async fn sso_login(
 
     let now = Utc::now().naive_utc();
     // Will trigger 2FA flow if needed
-    let (user, mut device, twofactor_token, sso_user) = match user_with_sso {
+    let (mut user, mut device, twofactor_token, sso_user) = match user_with_sso {
         None => {
             if !CONFIG.is_sso_signup_allowed(&user_infos.email) {
                 if CONFIG.signups_domains_whitelist().is_empty() {
@@ -375,10 +376,20 @@ async fn sso_login(
     // Set the user_uuid here to be passed back used for event logging.
     *user_id = Some(user.uuid.clone());
 
+    capture_locale(&mut user, client_header.locale, conn).await?;
+
     // We passed 2FA get auth tokens
     let auth_tokens = sso::redeem(&device, &user, data.client_id, sso_user, sso_auth, user_infos, conn).await?;
 
     authenticated_response(&user, &mut device, auth_tokens, twofactor_token, conn, ip).await
+}
+
+/// Takes the language the client asked for at login as the locale of the user's emails.
+async fn capture_locale(user: &mut User, requested: Option<Locale>, conn: &DbConn) -> EmptyResult {
+    if user.adopt_locale(requested) {
+        user.save(conn).await?;
+    }
+    Ok(())
 }
 
 async fn password_login(
@@ -514,6 +525,8 @@ async fn password_login(
             }
         )
     }
+
+    capture_locale(&mut user, client_header.locale, conn).await?;
 
     let auth_tokens = auth::AuthTokens::new(&device, &user, AuthMethod::Password, data.client_id);
 
@@ -706,7 +719,7 @@ async fn user_api_key_login(
         err!("Malformed client_id", format!("IP: {}.", ip.ip))
     };
     let client_user_id: UserId = client_user_id.into();
-    let Some(user) = User::find_by_uuid(&client_user_id, conn).await else {
+    let Some(mut user) = User::find_by_uuid(&client_user_id, conn).await else {
         err!("Invalid client_id", format!("IP: {}.", ip.ip))
     };
 
@@ -739,6 +752,8 @@ async fn user_api_key_login(
     check_client_version(&user, client_header)?;
 
     let mut device = get_device(&data, conn, &user).await?;
+
+    capture_locale(&mut user, client_header.locale, conn).await?;
 
     if CONFIG.mail_enabled() && device.is_new() {
         let now = Utc::now().naive_utc();
@@ -1447,5 +1462,33 @@ mod tests {
         );
         assert_eq!(client_version_error(true, Some(&version("2026.10.2")), DeviceType::Uwp as i32), None);
         assert_eq!(client_version_error(true, Some(&version("2026.11.0")), desktop), None);
+    }
+
+    #[cfg(sqlite)]
+    #[test]
+    fn test_capture_locale_saves_only_a_changed_locale() {
+        crate::db::test_db::run(async |db| {
+            let conn = db.conn();
+            // (stored, requested at login, expected stored in the database afterwards, expected a write)
+            let cases = [
+                (Locale::En, Some(Locale::Ru), Locale::Ru, true),
+                (Locale::Ru, Some(Locale::En), Locale::En, true),
+                (Locale::Ru, Some(Locale::Ru), Locale::Ru, false),
+                (Locale::Ru, None, Locale::Ru, false),
+            ];
+            for (stored, requested, expected, expect_write) in cases {
+                let mut user = User::new(&format!("{}@example.com", util::get_uuid()), None);
+                user.set_locale(stored);
+                user.save(&conn).await.unwrap();
+                let updated_at_before = User::find_by_uuid(&user.uuid, &conn).await.unwrap().updated_at;
+
+                capture_locale(&mut user, requested, &conn).await.unwrap();
+
+                let reloaded = User::find_by_uuid(&user.uuid, &conn).await.unwrap();
+                let case = format!("stored {stored:?}, requested {requested:?}");
+                assert_eq!(reloaded.locale(), expected, "locale in the database, {case}");
+                assert_eq!(reloaded.updated_at != updated_at_before, expect_write, "database write, {case}");
+            }
+        });
     }
 }
