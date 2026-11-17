@@ -842,7 +842,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unparseable_stored_locale_falls_back_to_server_default() {
+    fn test_unparsable_stored_locale_falls_back_to_server_default() {
         if !crate::locale::in_isolated_config(&[("EMAIL_DEFAULT_LOCALE", "ru")]) {
             return;
         }
@@ -879,7 +879,7 @@ mod tests {
     }
 
     #[test]
-    fn test_adopt_locale_keeps_unparseable_stored_value_when_nothing_requested() {
+    fn test_adopt_locale_keeps_unparsable_stored_value_when_nothing_requested() {
         if !crate::locale::in_isolated_config(&[]) {
             return;
         }
