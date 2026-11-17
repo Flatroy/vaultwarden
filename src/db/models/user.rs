@@ -14,6 +14,7 @@ use crate::{
         schema::{invitations, sso_users, twofactor_incomplete, users},
     },
     error::MapResult,
+    locale::Locale,
     sso::OIDCIdentifier,
     util::{format_date, get_uuid, retry},
 };
@@ -80,6 +81,9 @@ pub struct User {
     pub security_version: Option<i32>,
     /// JSON `{"wrappedUserKey1", "wrappedUserKey2"}` for sessions that still hold the v1 user key. Opaque to us.
     pub v2_upgrade_token: Option<String>,
+
+    /// The language of the emails sent to this user, a `Locale` code. Use `User::locale` to read it.
+    pub locale: String,
 }
 
 #[derive(Identifiable, Queryable, Insertable)]
@@ -187,7 +191,17 @@ impl User {
             security_state: None,
             security_version: None,
             v2_upgrade_token: None,
+
+            locale: Locale::server_default().code().to_owned(),
         }
+    }
+
+    pub fn locale(&self) -> Locale {
+        Locale::from_code(&self.locale).unwrap_or_else(Locale::server_default)
+    }
+
+    pub fn set_locale(&mut self, locale: Locale) {
+        locale.code().clone_into(&mut self.locale);
     }
 
     pub fn is_v2(&self) -> bool {
@@ -767,20 +781,7 @@ mod tests {
 
     #[test]
     fn test_has_v2_encryption() {
-        // User::new loads CONFIG; isolate it from the DNS bootstrap test and filesystem configuration.
-        if std::env::var_os("VAULTWARDEN_ISOLATED_CONFIG_TEST").is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", std::thread::current().name().unwrap(), "--nocapture"])
-                .env("VAULTWARDEN_ISOLATED_CONFIG_TEST", "1")
-                .env("DATABASE_URL", "sqlite://:memory:")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+        if !crate::locale::in_isolated_config(&[]) {
             return;
         }
 
@@ -797,5 +798,47 @@ mod tests {
         assert!(!user(Some("2.iv|data|mac"), Some(2)).has_v2_encryption());
         assert!(!user(Some("7"), Some(2)).has_v2_encryption());
         assert!(!user(None, Some(2)).has_v2_encryption());
+    }
+
+    #[test]
+    fn test_new_user_gets_server_default_locale() {
+        if !crate::locale::in_isolated_config(&[("EMAIL_DEFAULT_LOCALE", "ru")]) {
+            return;
+        }
+
+        let user = User::new("user@example.com", None);
+        assert_eq!(user.locale, "ru", "stored locale of a new user, EMAIL_DEFAULT_LOCALE=ru");
+        assert_eq!(user.locale(), Locale::Ru, "locale() of a new user, EMAIL_DEFAULT_LOCALE=ru");
+    }
+
+    #[test]
+    fn test_set_locale_and_read_back() {
+        if !crate::locale::in_isolated_config(&[]) {
+            return;
+        }
+
+        let mut user = User::new("user@example.com", None);
+        assert_eq!(user.locale(), Locale::En, "locale() of a new user, EMAIL_DEFAULT_LOCALE unset");
+
+        user.set_locale(Locale::Ru);
+        assert_eq!(user.locale, "ru", "stored locale after set_locale(Ru)");
+        assert_eq!(user.locale(), Locale::Ru, "locale() after set_locale(Ru)");
+
+        user.set_locale(Locale::En);
+        assert_eq!(user.locale, "en", "stored locale after set_locale(En)");
+        assert_eq!(user.locale(), Locale::En, "locale() after set_locale(En)");
+    }
+
+    #[test]
+    fn test_unparseable_stored_locale_falls_back_to_server_default() {
+        if !crate::locale::in_isolated_config(&[("EMAIL_DEFAULT_LOCALE", "ru")]) {
+            return;
+        }
+
+        let mut user = User::new("user@example.com", None);
+        for stored in ["", "de", "garbage"] {
+            user.locale = stored.to_owned();
+            assert_eq!(user.locale(), Locale::Ru, "locale() of stored {stored:?}, EMAIL_DEFAULT_LOCALE=ru");
+        }
     }
 }
