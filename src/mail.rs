@@ -850,7 +850,7 @@ async fn send_email(address: &str, subject: &str, body_html: String, body_text: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::locale::in_isolated_config;
+    use crate::locale::{TempPath, in_isolated_config};
 
     const EMAIL_TEMPLATES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/static/templates/email");
     const SHARED_PARTIALS: [&str; 3] = ["email_header", "email_footer", "email_footer_text"];
@@ -925,15 +925,14 @@ mod tests {
     }
 
     /// A templates folder under the system temp dir that the isolated config loads on top of the embedded templates.
-    fn templates_folder_with(test_name: &str, files: &[(&str, &str)]) -> String {
-        let folder = std::env::temp_dir().join(format!("vaultwarden_mail_test_{test_name}"));
-        drop(std::fs::remove_dir_all(&folder));
+    fn templates_folder_with(test_name: &str, files: &[(&str, &str)]) -> TempPath {
+        let folder = TempPath::new(&format!("mail_{test_name}"));
         for (relative_path, content) in files {
-            let path = folder.join(relative_path);
+            let path = folder.path().join(relative_path);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, content).unwrap();
         }
-        folder.to_str().unwrap().to_owned()
+        folder
     }
 
     #[test]
@@ -1009,7 +1008,7 @@ mod tests {
             "failing_ru",
             &[("email/ru/welcome.hbs", &broken), ("email/ru/welcome.html.hbs", &broken)],
         );
-        if !in_isolated_config(&[("TEMPLATES_FOLDER", &folder)]) {
+        if !in_isolated_config(&[("TEMPLATES_FOLDER", folder.as_str())]) {
             return;
         }
         let data = sample_data(&["url"]);
@@ -1029,7 +1028,7 @@ mod tests {
             "missing_ru",
             &[("email/only_english.hbs", &page), ("email/only_english.html.hbs", &page)],
         );
-        if !in_isolated_config(&[("TEMPLATES_FOLDER", &folder)]) {
+        if !in_isolated_config(&[("TEMPLATES_FOLDER", folder.as_str())]) {
             return;
         }
         let data = sample_data(&["url"]);
@@ -1058,7 +1057,7 @@ mod tests {
             "override_ru",
             &[("email/ru/welcome.hbs", &page), ("email/ru/welcome.html.hbs", &page)],
         );
-        if !in_isolated_config(&[("TEMPLATES_FOLDER", &folder)]) {
+        if !in_isolated_config(&[("TEMPLATES_FOLDER", folder.as_str())]) {
             return;
         }
         let (subject, ..) = render_text(Locale::Ru, WELCOME, &sample_data(&["url"])).unwrap();

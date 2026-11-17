@@ -185,6 +185,42 @@ fn parse_language_range(entry: &str) -> Option<(&str, f32)> {
     (QUALITY_MIN..=QUALITY_DEFAULT).contains(&quality).then_some((tag.trim(), quality))
 }
 
+/// A file or folder under the system temp dir that is removed when the guard drops, also when the test fails.
+#[cfg(test)]
+pub struct TempPath(std::path::PathBuf);
+
+#[cfg(test)]
+impl TempPath {
+    pub fn new(name: &str) -> Self {
+        let guard = Self(std::env::temp_dir().join(format!("vaultwarden_test_{name}")));
+        guard.remove();
+        guard
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.to_str().unwrap()
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+
+    fn remove(&self) {
+        if self.0.is_dir() {
+            drop(std::fs::remove_dir_all(&self.0));
+        } else {
+            drop(std::fs::remove_file(&self.0));
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TempPath {
+    fn drop(&mut self) {
+        self.remove();
+    }
+}
+
 /// CONFIG reads the environment and the filesystem. A test that needs it calls this first and returns when it is
 /// `false`: it then ran itself in a child process with an isolated config, plus `env`, and asserted that it passed.
 #[cfg(test)]
@@ -422,8 +458,9 @@ mod tests {
 
     #[test]
     fn test_locale_for_address_reads_the_user_locale() {
-        let database = std::env::temp_dir().join("vaultwarden_locale_test.sqlite3");
-        drop(std::fs::remove_file(&database));
+        let database_folder = TempPath::new("locale_database");
+        std::fs::create_dir_all(database_folder.path()).unwrap();
+        let database = database_folder.path().join("db.sqlite3");
         if !in_isolated_config(&[
             ("EMAIL_DEFAULT_LOCALE", "ru"),
             ("DATABASE_URL", &format!("sqlite://{}", database.to_str().unwrap())),
@@ -447,7 +484,6 @@ mod tests {
         for (address, expected, why) in cases {
             assert_eq!(block_on_runtime(locale_for_address(address)), expected, "{address}: {why}");
         }
-        drop(std::fs::remove_file(&database));
     }
 
     fn block_on_runtime<F: Future>(future: F) -> F::Output {
