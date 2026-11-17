@@ -1883,6 +1883,8 @@ where
     reg!(@withfallback "scss/vaultwarden.scss");
     reg!("scss/user.vaultwarden.scss");
 
+    crate::locale::register_email_templates(&mut hb);
+
     // And then load user templates to overwrite the defaults
     // Use .hbs extension for the files
     // Templates get registered with their relative name

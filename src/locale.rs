@@ -1,6 +1,15 @@
+use std::sync::OnceLock;
+
+use handlebars::Handlebars;
 use rocket::http::Status;
 
-use crate::{CONFIG, api::ApiResult};
+use crate::{
+    CONFIG,
+    api::ApiResult,
+    db::{DbPool, models::User},
+};
+
+const EMAIL_TEMPLATE_PREFIX: &str = "email/";
 
 const CODE_EN: &str = "en";
 const CODE_RU: &str = "ru";
@@ -76,6 +85,90 @@ impl Locale {
     /// `EMAIL_DEFAULT_LOCALE`, which config validation guarantees to be supported.
     pub fn server_default() -> Locale {
         Locale::from_code(&CONFIG.email_default_locale()).unwrap_or(Locale::En)
+    }
+}
+
+static DB_POOL: OnceLock<DbPool> = OnceLock::new();
+
+/// Gives the email code a way to look recipients up by address; the `send_*` functions have no database connection.
+pub fn init_db_pool(pool: DbPool) {
+    if DB_POOL.set(pool).is_err() {
+        warn!("Locale database pool is already initialized");
+    }
+}
+
+/// The locale of the user with this address; the server default when there is no such user or no database.
+pub async fn locale_for_address(address: &str) -> Locale {
+    let Some(pool) = DB_POOL.get() else {
+        return Locale::server_default();
+    };
+    match pool.get().await {
+        Ok(conn) => User::find_by_mail(address, &conn).await.map_or_else(Locale::server_default, |u| u.locale()),
+        Err(e) => {
+            warn!("Cannot look up the locale of the recipient, using the server default: {e:?}");
+            Locale::server_default()
+        }
+    }
+}
+
+/// Name of the template to try first for `locale`: `email/ru/welcome` for `email/welcome`, English is unchanged.
+pub fn localized_template_name(locale: Locale, template_name: &str) -> String {
+    match (locale, template_name.strip_prefix(EMAIL_TEMPLATE_PREFIX)) {
+        (Locale::Ru, Some(name)) => format!("{EMAIL_TEMPLATE_PREFIX}{}/{name}", Locale::Ru.code()),
+        _ => template_name.to_owned(),
+    }
+}
+
+macro_rules! ru_email_templates {
+    ($($name:literal),+ $(,)?) => {
+        const RU_EMAIL_TEMPLATES: &[(&str, &str)] = &[$(
+            (concat!("email/ru/", $name), include_str!(concat!("static/templates/email/ru/", $name, ".hbs"))),
+            (
+                concat!("email/ru/", $name, ".html"),
+                include_str!(concat!("static/templates/email/ru/", $name, ".html.hbs")),
+            ),
+        )+];
+    };
+}
+
+ru_email_templates!(
+    "admin_account_recovery",
+    "change_email",
+    "change_email_existing",
+    "change_email_invited",
+    "delete_account",
+    "emergency_access_invite_accepted",
+    "emergency_access_invite_confirmed",
+    "emergency_access_recovery_approved",
+    "emergency_access_recovery_initiated",
+    "emergency_access_recovery_rejected",
+    "emergency_access_recovery_reminder",
+    "emergency_access_recovery_timed_out",
+    "incomplete_2fa_login",
+    "invite_accepted",
+    "invite_confirmed",
+    "new_device_logged_in",
+    "protected_action",
+    "pw_hint_none",
+    "pw_hint_some",
+    "recover_twofactor",
+    "register_verify_email",
+    "send_2fa_removed_from_org",
+    "send_emergency_access_invite",
+    "send_org_invite",
+    "send_single_org_removed_from_org",
+    "smtp_test",
+    "sso_change_email",
+    "twofactor_email",
+    "verify_email",
+    "welcome",
+    "welcome_must_verify",
+);
+
+/// Registers the embedded Russian emails. Call it before loading the user templates folder, so that its files override them.
+pub fn register_email_templates(hb: &mut Handlebars<'_>) {
+    for (name, template) in RU_EMAIL_TEMPLATES {
+        hb.register_template_string(name, template).expect("embedded Russian email template must compile");
     }
 }
 
@@ -266,5 +359,98 @@ mod tests {
             assert!(message.contains("en, ru"), "message for {code:?} must list the supported codes: {message:?}");
             assert!(!message.contains('\n'), "message for {code:?} must escape the input: {message:?}");
         }
+    }
+
+    #[test]
+    fn test_localized_template_name() {
+        let cases = [
+            (Locale::En, "email/welcome", "email/welcome"),
+            (Locale::En, "email/welcome.html", "email/welcome.html"),
+            (Locale::Ru, "email/welcome", "email/ru/welcome"),
+            (Locale::Ru, "email/welcome.html", "email/ru/welcome.html"),
+            (Locale::Ru, "admin/base", "admin/base"),
+            (Locale::Ru, "404", "404"),
+        ];
+        for (locale, template, expected) in cases {
+            assert_eq!(
+                localized_template_name(locale, template),
+                expected,
+                "localized_template_name({locale:?}, {template:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_embedded_russian_templates_match_the_files() {
+        let mut embedded: Vec<String> =
+            RU_EMAIL_TEMPLATES.iter().map(|(name, _)| name.strip_prefix("email/ru/").unwrap().to_owned()).collect();
+        let mut on_disk: Vec<String> =
+            std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/src/static/templates/email/ru"))
+                .unwrap()
+                .filter_map(|entry| {
+                    entry.unwrap().file_name().into_string().unwrap().strip_suffix(".hbs").map(str::to_owned)
+                })
+                .collect();
+        embedded.sort();
+        on_disk.sort();
+        assert_eq!(embedded, on_disk, "templates registered in ru_email_templates! vs .hbs files in email/ru");
+    }
+
+    #[test]
+    fn test_register_email_templates() {
+        let mut hb = Handlebars::new();
+        register_email_templates(&mut hb);
+        for (name, _) in RU_EMAIL_TEMPLATES {
+            assert!(hb.has_template(name), "template {name:?} is not registered");
+        }
+        assert_eq!(
+            hb.get_templates().len(),
+            RU_EMAIL_TEMPLATES.len(),
+            "registered templates: {:?}",
+            hb.get_templates().keys()
+        );
+    }
+
+    #[test]
+    fn test_locale_for_address_without_database_is_server_default() {
+        if !in_isolated_config(&[("EMAIL_DEFAULT_LOCALE", "ru")]) {
+            return;
+        }
+        let locale = block_on_runtime(locale_for_address("nobody@example.com"));
+        assert_eq!(locale, Locale::Ru, "unknown address, no pool, EMAIL_DEFAULT_LOCALE=ru");
+    }
+
+    #[test]
+    fn test_locale_for_address_reads_the_user_locale() {
+        let database = std::env::temp_dir().join("vaultwarden_locale_test.sqlite3");
+        drop(std::fs::remove_file(&database));
+        if !in_isolated_config(&[
+            ("EMAIL_DEFAULT_LOCALE", "ru"),
+            ("DATABASE_URL", &format!("sqlite://{}", database.to_str().unwrap())),
+        ]) {
+            return;
+        }
+        let pool = DbPool::from_config().unwrap();
+        block_on_runtime(async {
+            let conn = pool.get().await.unwrap();
+            let mut english_user = User::new("english@example.com", None);
+            english_user.set_locale(Locale::En);
+            english_user.save(&conn).await.unwrap();
+        });
+        init_db_pool(pool);
+
+        let cases = [
+            ("english@example.com", Locale::En, "user stored with en overrides the ru server default"),
+            ("ENGLISH@Example.com", Locale::En, "lookup ignores the case of the address"),
+            ("nobody@example.com", Locale::Ru, "unknown address gets the ru server default"),
+        ];
+        for (address, expected, why) in cases {
+            assert_eq!(block_on_runtime(locale_for_address(address)), expected, "{address}: {why}");
+        }
+        drop(std::fs::remove_file(&database));
+    }
+
+    fn block_on_runtime<F: Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(future)
     }
 }
