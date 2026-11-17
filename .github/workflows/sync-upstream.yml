@@ -1,0 +1,83 @@
+name: Sync upstream
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+on:
+  schedule:
+    # off the top of the hour, when GitHub may delay or drop scheduled runs
+    - cron: "37 3 * * *"
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  sync:
+    name: Merge upstream main
+    # Only meaningful in the fork, never in the upstream repository itself
+    if: ${{ github.repository != 'dani-garcia/vaultwarden' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      # Must match the exit codes in tools/sync_upstream.sh
+      EXIT_CONFLICT: "10"
+      EXIT_DRIFT: "11"
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require SYNC_TOKEN
+        env:
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          if [ -z "${SYNC_TOKEN}" ]; then
+            echo "::error::Secret SYNC_TOKEN is missing. Owner: add a fine-grained PAT (Contents: write, Workflows: write on this repository). See FORK.md."
+            exit 1
+          fi
+
+      - name: Merge upstream main
+        id: sync
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/dani-garcia/vaultwarden.git
+          status=0
+          tools/sync_upstream.sh || status=$?
+          echo "status=${status}" >> "${GITHUB_OUTPUT}"
+          if [ "${status}" -ne 0 ] && [ "${status}" -ne "${EXIT_CONFLICT}" ] && [ "${status}" -ne "${EXIT_DRIFT}" ]; then
+            exit "${status}"
+          fi
+
+      # GITHUB_TOKEN cannot push commits that change .github/workflows, so a PAT is used
+      - name: Push main and upstream tags
+        if: ${{ steps.sync.outputs.status == '0' || steps.sync.outputs.status == '11' }}
+        env:
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          remote="https://x-access-token:${SYNC_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push "${remote}" main
+          git push "${remote}" --tags
+
+      # A failed run is the notification: GitHub emails the owner about failed scheduled runs
+      - name: Fail on conflict or outdated translations
+        env:
+          SYNC_STATUS: ${{ steps.sync.outputs.status }}
+        run: |
+          if [ "${SYNC_STATUS}" = "${EXIT_CONFLICT}" ]; then
+            echo "::error::Merge conflict with upstream main (files listed in the 'Merge upstream main' step). Merge manually, see FORK.md."
+            exit 1
+          fi
+          if [ "${SYNC_STATUS}" = "${EXIT_DRIFT}" ]; then
+            echo "::error::Upstream merged and pushed, but Russian email translations are outdated (templates listed in the 'Merge upstream main' step). See FORK.md."
+            exit 1
+          fi
