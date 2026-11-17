@@ -6,7 +6,7 @@ use rocket::http::Status;
 use crate::{
     CONFIG,
     api::ApiResult,
-    db::{DbPool, models::User},
+    db::{DbConn, DbPool, models::User},
 };
 
 const EMAIL_TEMPLATE_PREFIX: &str = "email/";
@@ -103,12 +103,16 @@ pub async fn locale_for_address(address: &str) -> Locale {
         return Locale::server_default();
     };
     match pool.get().await {
-        Ok(conn) => User::find_by_mail(address, &conn).await.map_or_else(Locale::server_default, |u| u.locale()),
+        Ok(conn) => locale_of_recipient(address, &conn).await,
         Err(e) => {
             warn!("Cannot look up the locale of the recipient, using the server default: {e:?}");
             Locale::server_default()
         }
     }
+}
+
+async fn locale_of_recipient(address: &str, conn: &DbConn) -> Locale {
+    User::find_by_mail(address, conn).await.map_or_else(Locale::server_default, |user| user.locale())
 }
 
 /// Name of the template to try first for `locale`: `email/ru/welcome` for `email/welcome`, English is unchanged.
@@ -456,34 +460,28 @@ mod tests {
         assert_eq!(locale, Locale::Ru, "unknown address, no pool, EMAIL_DEFAULT_LOCALE=ru");
     }
 
+    #[cfg(sqlite)]
     #[test]
-    fn test_locale_for_address_reads_the_user_locale() {
-        let database_folder = TempPath::new("locale_database");
-        std::fs::create_dir_all(database_folder.path()).unwrap();
-        let database = database_folder.path().join("db.sqlite3");
-        if !in_isolated_config(&[
-            ("EMAIL_DEFAULT_LOCALE", "ru"),
-            ("DATABASE_URL", &format!("sqlite://{}", database.to_str().unwrap())),
-        ]) {
-            return;
-        }
-        let pool = DbPool::from_config().unwrap();
-        block_on_runtime(async {
-            let conn = pool.get().await.unwrap();
-            let mut english_user = User::new("english@example.com", None);
-            english_user.set_locale(Locale::En);
-            english_user.save(&conn).await.unwrap();
-        });
-        init_db_pool(pool);
+    fn test_locale_of_recipient_reads_the_user_locale() {
+        crate::db::test_db::run(async |db| {
+            let conn = db.conn();
+            for (email, stored) in [("english@example.com", Locale::En), ("russian@example.com", Locale::Ru)] {
+                let mut user = User::new(email, None);
+                user.set_locale(stored);
+                user.save(&conn).await.unwrap();
+            }
 
-        let cases = [
-            ("english@example.com", Locale::En, "user stored with en overrides the ru server default"),
-            ("ENGLISH@Example.com", Locale::En, "lookup ignores the case of the address"),
-            ("nobody@example.com", Locale::Ru, "unknown address gets the ru server default"),
-        ];
-        for (address, expected, why) in cases {
-            assert_eq!(block_on_runtime(locale_for_address(address)), expected, "{address}: {why}");
-        }
+            // EMAIL_DEFAULT_LOCALE is unset here, so the server default is English
+            let cases = [
+                ("russian@example.com", Locale::Ru, "user stored with ru"),
+                ("RUSSIAN@Example.com", Locale::Ru, "lookup ignores the case of the address"),
+                ("english@example.com", Locale::En, "user stored with en"),
+                ("nobody@example.com", Locale::En, "unknown address gets the server default"),
+            ];
+            for (address, expected, why) in cases {
+                assert_eq!(locale_of_recipient(address, &conn).await, expected, "{address}: {why}");
+            }
+        });
     }
 
     fn block_on_runtime<F: Future>(future: F) -> F::Output {
